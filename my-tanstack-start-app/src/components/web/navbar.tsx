@@ -1,29 +1,18 @@
 import { useEffect, useMemo, useRef } from 'react'
 
 /**
- * LorenzAttractorBackground (image background version)
- * - Uses a real universe image from /public/universe.png
- * - No fixed starfield
+ * LorenzAttractorBackground (performance-friendly "velvet" version)
+ * - No backdrop-filter
  * - Canvas renderScale + DPR cap
  * - Pre-rendered orb sprites (no per-particle gradients)
+ * - Spherical stars via sprites (no pixel squares)
  * - Cheap soft veil + cheap tiled grain overlay
- *
- * MOD:
- * - Runs at 600% speed for the first minute, then returns to normal speed.
- *
- * MOD 2:
- * - Camera orbit: slowly rotates in a spherical path around the attractor,
- *   so you observe it from multiple viewpoints over time.
- *
- * MOD 3:
- * - Gentle background zoom: 30s zoom-in, then 30s zoom-out at same speed (ping-pong).
- * - Implemented via GPU transform scale on the background layer (best quality for a CSS background).
  */
 export default function LorenzAttractorBackground({
   className = '',
   particleCount = 1100,
 
-  // Lorenz parameters
+  // Lorenz parameters (classic chaotic set)
   sigma = 10,
   rho = 28,
   beta = 8 / 3,
@@ -33,28 +22,28 @@ export default function LorenzAttractorBackground({
   stepsPerFrame = 1,
 
   // Attractor visuals
-  trail = 0.18,
+  trail = 0.18, // 0..1 : higher = shorter trails
   pointSize = 2.6,
   opacity = 0.85,
 
-  // Background image
-  backgroundImageSrc = '/universe.png',
-  backgroundImageOpacity = 0.9,
-  backgroundImageScale = 1.06,
-  backgroundImagePosition = '50% 50%',
-  backgroundImageBrightness = 0.92,
-  backgroundImageContrast = 1.08,
-  backgroundImageSaturate = 1.05,
-
-  // Fallback color (behind image)
+  // Backdrop layer (dark blue space)
   backgroundColor = '#020617',
   backgroundOpacity = 1,
+  backgroundClassName = '',
 
-  // Performance smoothing
-  renderScale = 0.82,
+  // Starfield (fixed)
+  starsEnabled = true,
+  starCount = 650,
+  starOpacity = 0.55,
+  starSizeMin = 0.6,
+  starSizeMax = 1.8,
+  starDepth = 3.2,
+
+  // Performance smoothing (NEW)
+  renderScale = 0.82, // 0.6..1 (lower = faster + smoother)
   dprMax = 1.25,
 
-  // Velvet overlays
+  // Cheap "velvet" overlays (NEW)
   velvetEnabled = true,
   veilOpacity = 1,
   grainOpacity = 0.06,
@@ -77,16 +66,16 @@ export default function LorenzAttractorBackground({
   pointSize?: number
   opacity?: number
 
-  backgroundImageSrc?: string
-  backgroundImageOpacity?: number
-  backgroundImageScale?: number
-  backgroundImagePosition?: string
-  backgroundImageBrightness?: number
-  backgroundImageContrast?: number
-  backgroundImageSaturate?: number
-
   backgroundColor?: string
   backgroundOpacity?: number
+  backgroundClassName?: string
+
+  starsEnabled?: boolean
+  starCount?: number
+  starOpacity?: number
+  starSizeMin?: number
+  starSizeMax?: number
+  starDepth?: number
 
   renderScale?: number
   dprMax?: number
@@ -97,10 +86,9 @@ export default function LorenzAttractorBackground({
 
   activation?: (normalizedSpeed01: number) => number
 }) {
+  const starsCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const attractorCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const bgRef = useRef<HTMLDivElement | null>(null)
   const rafRef = useRef<number | null>(null)
-  const startTimeRef = useRef<number>(performance.now())
 
   // Inline SVG grain (tiny + seamless, cheap)
   const grainDataUri = useMemo(() => {
@@ -119,26 +107,66 @@ export default function LorenzAttractorBackground({
     return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
   }, [])
 
-  // Seeds
+  // Blob of nearby initial conditions
   const seeds = useMemo(() => {
-    const pts: Array<{ x: number; y: number; z: number }> = []
+    const pts: Array<{
+      x: number
+      y: number
+      z: number
+      px: number
+      py: number
+      pz: number
+    }> = []
     const base = { x: 0.1, y: 0, z: 0 }
     for (let i = 0; i < particleCount; i++) {
       const j = 0.004
       const x = base.x + (Math.random() - 0.5) * j
       const y = base.y + (Math.random() - 0.5) * j
       const z = base.z + (Math.random() - 0.5) * j
-      pts.push({ x, y, z })
+      pts.push({ x, y, z, px: x, py: y, pz: z })
     }
     return pts
   }, [particleCount])
 
-  useEffect(() => {
-    const canvas = attractorCanvasRef.current
-    if (!canvas) return
+  // Fixed stars (generated once)
+  const stars = useMemo(() => {
+    const s: Array<{
+      x: number
+      y: number
+      z: number
+      r: number
+      a: number
+      tint: number
+    }> = []
+    for (let i = 0; i < starCount; i++) {
+      const u = Math.random()
+      const v = Math.random()
+      const theta = 2 * Math.PI * u
+      const phi = Math.acos(2 * v - 1)
 
-    const ctx = canvas.getContext('2d', { alpha: true })
+      const radius = 1.0 + Math.random() * 1.8
+      const x = radius * Math.sin(phi) * Math.cos(theta)
+      const y = radius * Math.sin(phi) * Math.sin(theta)
+      const z = radius * Math.cos(phi)
+
+      const r =
+        starSizeMin + Math.random() * Math.max(0.001, starSizeMax - starSizeMin)
+      const a = 0.35 + Math.random() * 0.65
+      const tint = 200 + Math.random() * 40
+      s.push({ x, y, z, r, a, tint })
+    }
+    return s
+  }, [starCount, starSizeMin, starSizeMax])
+
+  useEffect(() => {
+    const starsCanvas = starsCanvasRef.current
+    const attractorCanvas = attractorCanvasRef.current
+    if (!attractorCanvas) return
+
+    const ctx = attractorCanvas.getContext('2d', { alpha: true })
     if (!ctx) return
+
+    const starsCtx = starsCanvas?.getContext('2d', { alpha: true }) || null
 
     const dpr = Math.max(1, Math.min(dprMax, window.devicePixelRatio || 1))
     const rs = Math.max(0.5, Math.min(1, renderScale))
@@ -148,9 +176,10 @@ export default function LorenzAttractorBackground({
     let rw = 0
     let rh = 0
 
+    // Camera / projection
     const center = { x: 0, y: 0 }
 
-    // running bounds for auto-scale
+    // Running bounds for auto-scaling (keeps the attractor framed)
     let minX = Infinity,
       maxX = -Infinity,
       minY = Infinity,
@@ -158,14 +187,97 @@ export default function LorenzAttractorBackground({
       minZ = Infinity,
       maxZ = -Infinity
 
-    // Camera rotation state (updated per-frame)
-    let cy = 1,
-      sy = 0,
-      cp = 1,
-      sp = 0
+    const yaw = 0.55
+    const pitch = -0.25
+    const cy = Math.cos(yaw),
+      sy = Math.sin(yaw)
+    const cp = Math.cos(pitch),
+      sp = Math.sin(pitch)
 
+    // --- Sprite caches (fast) ---
     const ORB_BUCKETS = 16
+    const STAR_BUCKETS = 8
 
+    const makeOrbSprite = (
+      size: number,
+      hue: number,
+      sat: number,
+      light: number,
+    ) => {
+      const c = document.createElement('canvas')
+      c.width = size
+      c.height = size
+      const g = c.getContext('2d', { alpha: true })!
+      const r = size / 2
+      const gx = r * 0.72
+      const gy = r * 0.72
+
+      const grad = g.createRadialGradient(gx, gy, r * 0.1, r, r, r)
+      grad.addColorStop(
+        0,
+        `hsla(${hue}, ${sat}%, ${Math.min(98, light + 30)}%, 1)`,
+      )
+      grad.addColorStop(0.55, `hsla(${hue}, ${sat}%, ${light}%, 0.9)`)
+      grad.addColorStop(1, `hsla(${hue}, ${sat}%, ${light}%, 0)`)
+
+      g.fillStyle = grad
+      g.beginPath()
+      g.arc(r, r, r, 0, Math.PI * 2)
+      g.fill()
+      return c
+    }
+
+    const orbSprites: HTMLCanvasElement[] = Array.from(
+      { length: ORB_BUCKETS },
+      (_, i) => {
+        const hue = 195 + (45 * i) / (ORB_BUCKETS - 1)
+        return makeOrbSprite(64, hue, 70, 55)
+      },
+    )
+
+    const starSprites: HTMLCanvasElement[] = Array.from(
+      { length: STAR_BUCKETS },
+      (_, i) => {
+        const hue = 200 + (40 * i) / (STAR_BUCKETS - 1)
+        return makeOrbSprite(32, hue, 30, 92)
+      },
+    )
+
+    const resize = () => {
+      w = Math.floor(window.innerWidth)
+      h = Math.floor(window.innerHeight)
+
+      rw = Math.max(1, Math.floor(w * dpr * rs))
+      rh = Math.max(1, Math.floor(h * dpr * rs))
+
+      // Attractor canvas (render smaller, display full size)
+      attractorCanvas.width = rw
+      attractorCanvas.height = rh
+      attractorCanvas.style.width = `${w}px`
+      attractorCanvas.style.height = `${h}px`
+
+      // Draw using "screen coords" but mapped to smaller backbuffer
+      ctx.setTransform(rw / w, 0, 0, rh / h, 0, 0)
+      ctx.imageSmoothingEnabled = true
+
+      // Stars canvas
+      if (starsCanvas && starsCtx) {
+        starsCanvas.width = rw
+        starsCanvas.height = rh
+        starsCanvas.style.width = `${w}px`
+        starsCanvas.style.height = `${h}px`
+
+        starsCtx.setTransform(rw / w, 0, 0, rh / h, 0, 0)
+        starsCtx.imageSmoothingEnabled = true
+      }
+
+      center.x = w / 2
+      center.y = h / 2
+
+      if (starsEnabled) drawStars()
+    }
+
+    // Helper: Lorenz derivatives
     const deriv = (x: number, y: number, z: number) => {
       const dx = sigma * (y - x)
       const dy = x * (rho - z) - y
@@ -173,6 +285,7 @@ export default function LorenzAttractorBackground({
       return { dx, dy, dz }
     }
 
+    // RK4 step for stability
     const rk4 = (p: { x: number; y: number; z: number }, hStep: number) => {
       const k1 = deriv(p.x, p.y, p.z)
       const k2 = deriv(
@@ -196,50 +309,8 @@ export default function LorenzAttractorBackground({
       p.z += (hStep / 6) * (k1.dz + 2 * k2.dz + 2 * k3.dz + k4.dz)
     }
 
-    const makeOrbSprite = (size: number, hue: number) => {
-      const c = document.createElement('canvas')
-      c.width = size
-      c.height = size
-      const g = c.getContext('2d', { alpha: true })
-      if (!g) return c
-      const r = size / 2
-      const grad = g.createRadialGradient(r * 0.72, r * 0.72, r * 0.1, r, r, r)
-      grad.addColorStop(0, `hsla(${hue},70%,85%,1)`)
-      grad.addColorStop(0.55, `hsla(${hue},70%,55%,0.9)`)
-      grad.addColorStop(1, `hsla(${hue},70%,55%,0)`)
-      g.fillStyle = grad
-      g.beginPath()
-      g.arc(r, r, r, 0, Math.PI * 2)
-      g.fill()
-      return c
-    }
-
-    // sprite cache
-    const orbSprites = Array.from({ length: ORB_BUCKETS }, (_, i) =>
-      makeOrbSprite(64, 195 + (45 * i) / (ORB_BUCKETS - 1)),
-    )
-
-    const resize = () => {
-      w = Math.floor(window.innerWidth)
-      h = Math.floor(window.innerHeight)
-
-      rw = Math.max(1, Math.floor(w * dpr * rs))
-      rh = Math.max(1, Math.floor(h * dpr * rs))
-
-      canvas.width = rw
-      canvas.height = rh
-      canvas.style.width = `${w}px`
-      canvas.style.height = `${h}px`
-
-      // map logical screen coords onto smaller backbuffer
-      ctx.setTransform(rw / w, 0, 0, rh / h, 0, 0)
-      ctx.imageSmoothingEnabled = true
-
-      center.x = w / 2
-      center.y = h / 2
-    }
-
-    const project = (x: number, y: number, z: number) => {
+    // Project 3D point to screen (attractor: adaptive bounds)
+    const projectAttractor = (x: number, y: number, z: number) => {
       minX = Math.min(minX, x)
       maxX = Math.max(maxX, x)
       minY = Math.min(minY, y)
@@ -255,15 +326,15 @@ export default function LorenzAttractorBackground({
       const ny = ((y - (minY + spanY / 2)) / (spanY / 2)) * 0.92
       const nz = ((z - (minZ + spanZ / 2)) / (spanZ / 2)) * 0.92
 
-      // yaw (Y axis)
+      // rotate Y then X
       let rx = nx * cy + nz * sy
       let rz = -nx * sy + nz * cy
-
-      // pitch (X axis)
       let ry = ny * cp - rz * sp
       rz = ny * sp + rz * cp
 
-      const s = 1.1 / (2.6 - rz)
+      const perspective = 1.1
+      const depth = 2.6
+      const s = perspective / (depth - rz)
 
       return {
         sx: center.x + rx * s * Math.min(w, h) * 0.42,
@@ -272,84 +343,105 @@ export default function LorenzAttractorBackground({
       }
     }
 
-    const fade = () => {
-      ctx.save()
-      ctx.globalCompositeOperation = 'destination-out'
-      ctx.fillStyle = `rgba(0,0,0,${Math.max(0, Math.min(1, trail))})`
-      ctx.fillRect(0, 0, w, h)
-      ctx.restore()
+    // Project star point (fixed camera, no adaptive bounds)
+    const projectStar = (x: number, y: number, z: number) => {
+      let rx = x * cy + z * sy
+      let rz = -x * sy + z * cy
+      let ry = y * cp - rz * sp
+      rz = y * sp + rz * cp
+
+      const perspective = 1.0
+      const depth = Math.max(1.8, starDepth)
+      const s = perspective / (depth - rz)
+
+      return {
+        sx: center.x + rx * s * Math.min(w, h) * 0.55,
+        sy: center.y + ry * s * Math.min(w, h) * 0.55,
+        depth: rz,
+      }
     }
 
-    // Smoothstep for gentle zoom easing (reduces shimmer)
-    const smooth01 = (x: number) => {
-      const t = Math.max(0, Math.min(1, x))
-      return t * t * (3 - 2 * t)
+    const drawStars = () => {
+      if (!starsEnabled || !starsCtx || !starsCanvas) return
+      starsCtx.clearRect(0, 0, w, h)
+
+      starsCtx.save()
+      starsCtx.globalCompositeOperation = 'source-over'
+      starsCtx.imageSmoothingEnabled = true
+
+      for (let i = 0; i < stars.length; i++) {
+        const st = stars[i]
+        const p = projectStar(st.x, st.y, st.z)
+        const depth01 = Math.max(0, Math.min(1, (p.depth + 1) / 2))
+
+        const a =
+          Math.max(0, Math.min(1, starOpacity)) * st.a * (0.2 + 0.8 * depth01)
+
+        const r = st.r * (0.9 + 1.2 * depth01)
+
+        const bucket = Math.max(
+          0,
+          Math.min(
+            STAR_BUCKETS - 1,
+            Math.floor(((st.tint - 200) / 40) * (STAR_BUCKETS - 1)),
+          ),
+        )
+        const spr = starSprites[bucket]
+
+        starsCtx.globalAlpha = a
+        starsCtx.drawImage(spr, p.sx - r, p.sy - r, r * 2, r * 2)
+      }
+
+      // cheap bloom pass (single drawImage, no blur filters)
+      starsCtx.globalCompositeOperation = 'lighter'
+      starsCtx.globalAlpha = 0.18
+      starsCtx.drawImage(starsCanvas, 0, 0)
+
+      starsCtx.restore()
+      starsCtx.globalAlpha = 1
+    }
+
+    // Fade attractor trails toward transparent
+    const fadeAttractor = () => {
+      ctx.save()
+      ctx.globalCompositeOperation = 'destination-out'
+      const t = Math.max(0, Math.min(1, trail))
+      ctx.fillStyle = `rgba(0,0,0,${t})`
+      ctx.fillRect(0, 0, w, h)
+      ctx.restore()
     }
 
     resize()
     window.addEventListener('resize', resize)
 
+    // Ensure attractor starts transparent
     ctx.clearRect(0, 0, w, h)
 
-    const baseBgScale = Math.max(1, backgroundImageScale)
-    const zoomAmp = 0.04 // subtle (best for preserving perceived quality on cover backgrounds)
-    const halfCycle = 30 // seconds in, 30 seconds out
-
     const animate = () => {
-      const now = performance.now()
-      const elapsed = now - startTimeRef.current
-      const t = elapsed / 1000
-
-      // Background zoom ping-pong: 0->1 over 30s, then 1->0 over 30s
-      const cycle = halfCycle * 2
-      const u = (t % cycle) / cycle // 0..1
-      const phase01 = u < 0.5 ? smooth01(u * 2) : smooth01((1 - u) * 2) // 0..1..0
-      const bgScale = baseBgScale + zoomAmp * phase01
-
-      const bgEl = bgRef.current
-      if (bgEl) {
-        // translateZ(0) helps keep the layer on GPU and reduces wobble
-        bgEl.style.transform = `translateZ(0) scale(${bgScale})`
-      }
-
-      // Camera orbit (slow spherical): yaw steadily increases, pitch gently oscillates
-      const yawBase = 0.55
-      const pitchBase = -0.25
-      const yawSpeed = 0.12 // rad/s (slow)
-      const pitchAmp = 0.28 // radians
-      const pitchSpeed = 0.08 // rad/s (slow)
-
-      const yaw = yawBase + t * yawSpeed
-      const pitch = pitchBase + Math.sin(t * pitchSpeed) * pitchAmp
-
-      cy = Math.cos(yaw)
-      sy = Math.sin(yaw)
-      cp = Math.cos(pitch)
-      sp = Math.sin(pitch)
-
-      const speedFactor = elapsed < 60_000 ? 6 : 1
-      const effectiveDt = dt * speedFactor
-
-      fade()
+      fadeAttractor()
 
       ctx.save()
       ctx.globalCompositeOperation = 'lighter'
       ctx.imageSmoothingEnabled = true
 
       for (let i = 0; i < seeds.length; i++) {
-        const p = seeds[i] as { x: number; y: number; z: number }
+        const p = seeds[i]
+        p.px = p.x
+        p.py = p.y
+        p.pz = p.z
 
-        for (let s = 0; s < stepsPerFrame; s++) rk4(p, effectiveDt)
+        for (let s = 0; s < stepsPerFrame; s++) rk4(p, dt)
 
         const a = deriv(p.x, p.y, p.z)
         const speed = Math.sqrt(a.dx * a.dx + a.dy * a.dy + a.dz * a.dz)
         const ns = Math.max(0, Math.min(1, speed / 60))
         const act = activation(ns)
 
-        const pos = project(p.x, p.y, p.z)
-        const depth01 = Math.max(0, Math.min(1, (pos.depth + 1) / 2))
+        const p1 = projectAttractor(p.x, p.y, p.z)
+        const depth01 = Math.max(0, Math.min(1, (p1.depth + 1) / 2))
 
         const alpha = opacity * (0.35 + 0.65 * act) * (0.22 + 0.78 * depth01)
+
         const r = Math.max(0.9, (pointSize * (0.85 + 1.35 * depth01)) / 2)
 
         const bucket = Math.max(
@@ -359,7 +451,7 @@ export default function LorenzAttractorBackground({
         const spr = orbSprites[bucket]
 
         ctx.globalAlpha = alpha
-        ctx.drawImage(spr, pos.sx - r, pos.sy - r, r * 2, r * 2)
+        ctx.drawImage(spr, p1.sx - r, p1.sy - r, r * 2, r * 2)
       }
 
       ctx.restore()
@@ -376,6 +468,10 @@ export default function LorenzAttractorBackground({
     }
   }, [
     seeds,
+    stars,
+    starsEnabled,
+    starOpacity,
+    starDepth,
     sigma,
     rho,
     beta,
@@ -387,7 +483,6 @@ export default function LorenzAttractorBackground({
     activation,
     renderScale,
     dprMax,
-    backgroundImageScale,
   ])
 
   return (
@@ -397,37 +492,20 @@ export default function LorenzAttractorBackground({
         className
       }
     >
-      {/* Fallback solid backdrop behind the image */}
+      {/* Backdrop layer */}
       <div
-        className="absolute inset-0"
+        className={'absolute inset-0 ' + backgroundClassName}
         style={{
           backgroundColor,
           opacity: Math.max(0, Math.min(1, backgroundOpacity)),
         }}
       />
 
-      {/* Universe image background */}
-      <div
-        ref={bgRef}
-        className="absolute inset-0"
-        style={{
-          backgroundImage: `url("${backgroundImageSrc}")`,
-          backgroundSize: 'cover',
-          backgroundRepeat: 'no-repeat',
-          backgroundPosition: backgroundImagePosition,
-          opacity: Math.max(0, Math.min(1, backgroundImageOpacity)),
-          transform: `translateZ(0) scale(${Math.max(1, backgroundImageScale)})`,
-          transformOrigin: backgroundImagePosition,
-          filter: `brightness(${Math.max(
-            0.1,
-            backgroundImageBrightness,
-          )}) contrast(${Math.max(
-            0.1,
-            backgroundImageContrast,
-          )}) saturate(${Math.max(0.1, backgroundImageSaturate)})`,
-          willChange: 'transform',
-          backfaceVisibility: 'hidden',
-        }}
+      {/* Fixed starfield layer */}
+      <canvas
+        ref={starsCanvasRef}
+        className="absolute inset-0 h-full w-full"
+        style={{ opacity: starsEnabled ? 1 : 0 }}
       />
 
       {/* Attractor layer */}
@@ -443,8 +521,8 @@ export default function LorenzAttractorBackground({
           style={{
             opacity: Math.max(0, Math.min(1, veilOpacity)),
             background:
-              'radial-gradient(1200px 800px at 50% 30%, rgba(255,255,255,0.04), rgba(255,255,255,0) 60%),' +
-              'radial-gradient(1000px 700px at 20% 80%, rgba(99,102,241,0.05), rgba(0,0,0,0) 55%)',
+              'radial-gradient(1200px 800px at 50% 30%, rgba(255,255,255,0.05), rgba(255,255,255,0) 60%),' +
+              'radial-gradient(1000px 700px at 20% 80%, rgba(99,102,241,0.06), rgba(0,0,0,0) 55%)',
           }}
         />
       )}
@@ -472,31 +550,19 @@ export function Navbar() {
       <nav className="sticky top-0 z-50 backdrop-blur-2xl supports-[backdrop-filter]:bg-white/10">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <img
-              src="https://avatars.githubusercontent.com/u/72518640?s=200&v=4"
-              alt="Tanstack logo"
-              className="size-8"
-            />
-            <h1 className="px-2 py-1 text-lg font-semibold">Tanstack Start</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <button className="rounded-lg bg-amber-400 px-2 py-1 font-semibold text-white shadow-lg shadow-amber-700/80 transition-colors hover:cursor-pointer hover:bg-amber-500">
-              Button
-            </button>
+            <h1 className="px-2 text-white py-1 text-lg font-semibold">
+              Raffaele-Pacilio.io
+            </h1>
           </div>
         </div>
       </nav>
 
       <LorenzAttractorBackground
-        // Put the generated image in:
-        // my-tanstack-start-app/public/universe.png
-        // and reference it like this:
-        backgroundImageSrc="/universe.png"
-        backgroundImageOpacity={0.92}
-        backgroundImageBrightness={0.9}
-        backgroundImageContrast={1.12}
-        backgroundImageSaturate={1.06}
-        particleCount={1100}
+        backgroundOpacity={1}
+        backgroundColor="#020617"
+        backgroundClassName="bg-gradient-to-b from-slate-950 via-blue-950/60 to-slate-950"
+        starsEnabled
+        particleCount={4000}
         renderScale={0.82}
         dprMax={1.25}
         velvetEnabled
