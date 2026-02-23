@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+body {
+  @apply m-0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+    monospace;
+}
+
+.lfo-container {
+  width: 60%;
+  margin: 0 auto;
+  animation: lfoWidth 14s infinite alternate;
+}
+
+/* LFO non uniforme */
+@keyframes lfoWidth {
+
+  /* partenza */
+  0% {
+    width: 58%;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); /* lento */
+  }
+
+  /* si allarga lentamente */
+  35% {
+    width: 78%;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.8, 0.2); /* accelera */
+  }
+
+  /* stringe più veloce */
+  55% {
+    width: 65%;
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.4, 1);
+  }
+
+  /* si riallarga lentamente */
+  80% {
+    width: 85%;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+
+  /* ritorna */
+  100% {
+    width: 60%;
+  }
+}
