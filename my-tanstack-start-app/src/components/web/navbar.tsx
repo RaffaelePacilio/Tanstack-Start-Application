@@ -2,11 +2,9 @@ import { useEffect, useMemo, useRef } from 'react'
 
 /**
  * LorenzAttractorBackground (performance-friendly "velvet" version)
- * - No backdrop-filter
- * - Canvas renderScale + DPR cap
- * - Pre-rendered orb sprites (no per-particle gradients)
- * - Spherical stars via sprites (no pixel squares)
- * - Cheap soft veil + cheap tiled grain overlay
+ * + Camera orbit starts immediately (orbitDelayMs default = 0)
+ * + Fixed stars rotate with camera
+ * + No warp/moving dots layer
  */
 export default function LorenzAttractorBackground({
   className = '',
@@ -31,7 +29,7 @@ export default function LorenzAttractorBackground({
   backgroundOpacity = 1,
   backgroundClassName = '',
 
-  // Starfield (fixed)
+  // Fixed stars (static)
   starsEnabled = true,
   starCount = 650,
   starOpacity = 0.55,
@@ -39,14 +37,21 @@ export default function LorenzAttractorBackground({
   starSizeMax = 1.8,
   starDepth = 3.2,
 
-  // Performance smoothing (NEW)
+  // Performance smoothing
   renderScale = 0.82, // 0.6..1 (lower = faster + smoother)
   dprMax = 1.25,
 
-  // Cheap "velvet" overlays (NEW)
+  // Cheap "velvet" overlays
   velvetEnabled = true,
   veilOpacity = 1,
   grainOpacity = 0.06,
+
+  // Camera orbit (STARTS NOW)
+  orbitEnabled = true,
+  orbitDelayMs = 0,
+  orbitSpeed = 0.11, // rad/s
+  orbitPitch = -0.25,
+  orbitPitchWobble = 0.04, // radians
 
   // "Activation" shaping: maps speed -> alpha
   activation = (v: number) => {
@@ -83,6 +88,12 @@ export default function LorenzAttractorBackground({
   velvetEnabled?: boolean
   veilOpacity?: number
   grainOpacity?: number
+
+  orbitEnabled?: boolean
+  orbitDelayMs?: number
+  orbitSpeed?: number
+  orbitPitch?: number
+  orbitPitchWobble?: number
 
   activation?: (normalizedSpeed01: number) => number
 }) {
@@ -187,12 +198,8 @@ export default function LorenzAttractorBackground({
       minZ = Infinity,
       maxZ = -Infinity
 
-    const yaw = 0.55
-    const pitch = -0.25
-    const cy = Math.cos(yaw),
-      sy = Math.sin(yaw)
-    const cp = Math.cos(pitch),
-      sp = Math.sin(pitch)
+    // Perf time refs
+    const startMs = performance.now()
 
     // --- Sprite caches (fast) ---
     const ORB_BUCKETS = 16
@@ -256,7 +263,6 @@ export default function LorenzAttractorBackground({
       attractorCanvas.style.width = `${w}px`
       attractorCanvas.style.height = `${h}px`
 
-      // Draw using "screen coords" but mapped to smaller backbuffer
       ctx.setTransform(rw / w, 0, 0, rh / h, 0, 0)
       ctx.imageSmoothingEnabled = true
 
@@ -273,8 +279,6 @@ export default function LorenzAttractorBackground({
 
       center.x = w / 2
       center.y = h / 2
-
-      if (starsEnabled) drawStars()
     }
 
     // Helper: Lorenz derivatives
@@ -309,8 +313,33 @@ export default function LorenzAttractorBackground({
       p.z += (hStep / 6) * (k1.dz + 2 * k2.dz + 2 * k3.dz + k4.dz)
     }
 
+    // Camera basis (yaw/pitch) computed per-frame
+    const getCamera = (nowMs: number) => {
+      const baseYaw = 0.55
+      const delay = Math.max(0, orbitDelayMs)
+      const orbitOn = orbitEnabled && nowMs - startMs >= delay
+      const tSec = Math.max(0, (nowMs - startMs - delay) / 1000)
+
+      const yaw = orbitOn ? baseYaw + tSec * orbitSpeed : baseYaw
+      const pitch =
+        (orbitEnabled ? orbitPitch : -0.25) +
+        (orbitOn ? Math.sin(tSec * 0.6) * orbitPitchWobble : 0)
+
+      const cy = Math.cos(yaw)
+      const sy = Math.sin(yaw)
+      const cp = Math.cos(pitch)
+      const sp = Math.sin(pitch)
+
+      return { cy, sy, cp, sp }
+    }
+
     // Project 3D point to screen (attractor: adaptive bounds)
-    const projectAttractor = (x: number, y: number, z: number) => {
+    const projectAttractor = (
+      x: number,
+      y: number,
+      z: number,
+      cam: { cy: number; sy: number; cp: number; sp: number },
+    ) => {
       minX = Math.min(minX, x)
       maxX = Math.max(maxX, x)
       minY = Math.min(minY, y)
@@ -327,10 +356,10 @@ export default function LorenzAttractorBackground({
       const nz = ((z - (minZ + spanZ / 2)) / (spanZ / 2)) * 0.92
 
       // rotate Y then X
-      let rx = nx * cy + nz * sy
-      let rz = -nx * sy + nz * cy
-      let ry = ny * cp - rz * sp
-      rz = ny * sp + rz * cp
+      let rx = nx * cam.cy + nz * cam.sy
+      let rz = -nx * cam.sy + nz * cam.cy
+      let ry = ny * cam.cp - rz * cam.sp
+      rz = ny * cam.sp + rz * cam.cp
 
       const perspective = 1.1
       const depth = 2.6
@@ -343,12 +372,17 @@ export default function LorenzAttractorBackground({
       }
     }
 
-    // Project star point (fixed camera, no adaptive bounds)
-    const projectStar = (x: number, y: number, z: number) => {
-      let rx = x * cy + z * sy
-      let rz = -x * sy + z * cy
-      let ry = y * cp - rz * sp
-      rz = y * sp + rz * cp
+    // Project static star point
+    const projectStar = (
+      x: number,
+      y: number,
+      z: number,
+      cam: { cy: number; sy: number; cp: number; sp: number },
+    ) => {
+      let rx = x * cam.cy + z * cam.sy
+      let rz = -x * cam.sy + z * cam.cy
+      let ry = y * cam.cp - rz * cam.sp
+      rz = y * cam.sp + rz * cam.cp
 
       const perspective = 1.0
       const depth = Math.max(1.8, starDepth)
@@ -361,8 +395,14 @@ export default function LorenzAttractorBackground({
       }
     }
 
-    const drawStars = () => {
+    const drawFixedStars = (cam: {
+      cy: number
+      sy: number
+      cp: number
+      sp: number
+    }) => {
       if (!starsEnabled || !starsCtx || !starsCanvas) return
+
       starsCtx.clearRect(0, 0, w, h)
 
       starsCtx.save()
@@ -371,7 +411,7 @@ export default function LorenzAttractorBackground({
 
       for (let i = 0; i < stars.length; i++) {
         const st = stars[i]
-        const p = projectStar(st.x, st.y, st.z)
+        const p = projectStar(st.x, st.y, st.z, cam)
         const depth01 = Math.max(0, Math.min(1, (p.depth + 1) / 2))
 
         const a =
@@ -392,7 +432,7 @@ export default function LorenzAttractorBackground({
         starsCtx.drawImage(spr, p.sx - r, p.sy - r, r * 2, r * 2)
       }
 
-      // cheap bloom pass (single drawImage, no blur filters)
+      // cheap bloom pass
       starsCtx.globalCompositeOperation = 'lighter'
       starsCtx.globalAlpha = 0.18
       starsCtx.drawImage(starsCanvas, 0, 0)
@@ -414,10 +454,17 @@ export default function LorenzAttractorBackground({
     resize()
     window.addEventListener('resize', resize)
 
-    // Ensure attractor starts transparent
+    // Start transparent
     ctx.clearRect(0, 0, w, h)
+    if (starsCtx) starsCtx.clearRect(0, 0, w, h)
 
-    const animate = () => {
+    const animate = (nowMs: number) => {
+      const cam = getCamera(nowMs)
+
+      // Fixed stars (camera-aware): redraw every frame to match orbit
+      if (starsEnabled) drawFixedStars(cam)
+
+      // Attractor
       fadeAttractor()
 
       ctx.save()
@@ -437,11 +484,10 @@ export default function LorenzAttractorBackground({
         const ns = Math.max(0, Math.min(1, speed / 60))
         const act = activation(ns)
 
-        const p1 = projectAttractor(p.x, p.y, p.z)
+        const p1 = projectAttractor(p.x, p.y, p.z, cam)
         const depth01 = Math.max(0, Math.min(1, (p1.depth + 1) / 2))
 
         const alpha = opacity * (0.35 + 0.65 * act) * (0.22 + 0.78 * depth01)
-
         const r = Math.max(0.9, (pointSize * (0.85 + 1.35 * depth01)) / 2)
 
         const bucket = Math.max(
@@ -483,6 +529,11 @@ export default function LorenzAttractorBackground({
     activation,
     renderScale,
     dprMax,
+    orbitEnabled,
+    orbitDelayMs,
+    orbitSpeed,
+    orbitPitch,
+    orbitPitchWobble,
   ])
 
   return (
@@ -567,6 +618,9 @@ export function Navbar() {
         dprMax={1.25}
         velvetEnabled
         grainOpacity={0.06}
+        orbitEnabled
+        orbitDelayMs={0}
+        orbitSpeed={0.11}
       />
     </>
   )
